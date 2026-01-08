@@ -1,0 +1,6 @@
+# Çalışma Zamanı Bağımlılıkları
+requests
+tqdm
+
+# Derleme ve EXE Oluşturma Bağımlılıkları
+pyinstaller
