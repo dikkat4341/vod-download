@@ -18,73 +18,87 @@ def load_ua_pool(update=False):
         with open(ua_file, 'r', encoding='utf-8') as f:
             pool = [line.strip() for line in f if line.strip()]
     if len(pool) < 30 or update:
-        pool = [generate_random_ua() for _ in range(35)]
+        pool = [generate_random_ua() for _ in range(40)]
         with open(ua_file, 'w', encoding='utf-8') as f:
             f.write('\n'.join(pool))
-        if update: print("✅ User-Agent listesi güncellendi.")
     return pool
 
 def turkish_to_english(text):
+    # Uzantıyı korumak için ayır
+    name, ext = os.path.splitext(text)
     m = {'ı':'i','ü':'u','ğ':'g','ö':'o','ş':'s','ç':'c','İ':'I','Ü':'U','Ğ':'G','Ö':'O','Ş':'S','Ç':'C',' ':'_'}
-    for tr, en in m.items(): text = text.replace(tr, en)
-    return re.sub(r'[^a-zA-Z0-9._-]', '', text)
+    for tr, en in m.items(): name = name.replace(tr, en)
+    clean_name = re.sub(r'[^a-zA-Z0-9._-]', '', name)
+    return clean_name + ext.lower()
+
+def check_m3u_info(url):
+    """Çalışmayan XTREAM API sorgusunu revize ettim."""
+    if url.lower() == '0': return
+    print("\n🔍 XTREAM API Sorgulanıyor...")
+    try:
+        parsed = urlparse(url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        params = dict(re.findall(r'(\w+)=([^&]+)', parsed.query))
+        user, pw = params.get('username'), params.get('password')
+        
+        if not user or not pw:
+            print("⚠️ URL Xtream formatında değil (username/password eksik).")
+            return
+
+        api_url = f"{base}/player_api.php?username={user}&password={pw}"
+        r = requests.get(api_url, timeout=15).json()
+        
+        u_info = r.get('user_info', {})
+        print(f"\n--- HESAP ANALİZİ ---")
+        print(f"🚦 Durum: {u_info.get('status', 'Bilinmiyor')}")
+        exp = u_info.get('exp_date')
+        if exp: print(f"📅 Bitiş: {datetime.fromtimestamp(int(exp))}")
+        print(f"🔗 Bağlantı: {u_info.get('active_cons', '0')} / {u_info.get('max_connections', '0')}")
+        print(f"---------------------\n")
+    except Exception as e:
+        print(f"❌ Sorgu Hatası: {e}")
 
 def parse_m3u_to_categories(content):
-    """M3U içeriğini akıllıca kategorilere ayırır."""
     categories = {}
     current_cat = "Diger"
-    lines = content.splitlines()
-    
     name = ""
-    for line in lines:
+    for line in content.splitlines():
         line = line.strip()
         if line.startswith('#EXTINF:'):
-            # group-title tespiti
             cat_match = re.search(r'group-title="([^"]+)"', line)
             current_cat = cat_match.group(1) if cat_match else "Belirtilmemis"
             name = line.split(',')[-1].strip()
         elif line.startswith('http'):
-            if current_cat not in categories:
-                categories[current_cat] = []
+            if current_cat not in categories: categories[current_cat] = []
             categories[current_cat].append((line, name))
             name = ""
     return categories
 
 def select_from_categories(categories):
-    """Kullanıcıya kategorileri sunar ve seçimini döner."""
     cat_names = sorted(list(categories.keys()))
     print("\n--- M3U KATEGORİ LİSTESİ ---")
+    print("0- GERİ DÖN")
     for i, cat in enumerate(cat_names, 1):
         print(f"{i}- {cat} [{len(categories[cat])} İçerik]")
-    
     print(f"{len(cat_names) + 1}- TÜMÜNÜ İNDİR")
     
+    choice = input("\nSeçiminiz: ")
+    if choice == '0': return "BACK"
     try:
-        choice = int(input("\nSeçiminiz (Sayı): "))
-        if choice == len(cat_names) + 1:
-            all_tasks = []
-            for c in cat_names: all_tasks.extend(categories[c])
-            return all_tasks
-        selected_cat = cat_names[choice - 1]
-        return categories[selected_cat]
-    except:
-        print("⚠️ Geçersiz seçim, işlem iptal edildi."); return []
-
-def get_extension_from_response(url, response):
-    parsed_path = urlparse(url).path
-    ext = os.path.splitext(parsed_path)[1].lower()
-    valid_exts = ['.mp4', '.mkv', '.avi', '.ts', '.mov', '.m2ts', '.wmv']
-    if ext in valid_exts: return ext
-    ctype = response.headers.get('Content-Type', '').lower()
-    if 'video/mp4' in ctype: return '.mp4'
-    if 'video/x-matroska' in ctype: return '.mkv'
-    if 'video/mp2t' in ctype: return '.ts'
-    return '.mkv'
+        idx = int(choice)
+        if idx == len(cat_names) + 1:
+            all_t = []
+            for c in cat_names: all_t.extend(categories[c])
+            return all_t
+        return categories[cat_names[idx-1]]
+    except: return []
 
 def download_engine(tasks, target_dir):
-    if not tasks: return
+    if not tasks or tasks == "BACK": return
     os.makedirs(target_dir, exist_ok=True)
-    print(f"🚀 Toplam {len(tasks)} içerik işleniyor...\n")
+    
+    # İstikrar için Session kullanımı
+    session = requests.Session()
     
     for url, name in tasks:
         retries = 0
@@ -92,37 +106,47 @@ def download_engine(tasks, target_dir):
         while retries < MAX_RETRIES and not success:
             ua = random.choice(load_ua_pool())
             try:
-                with requests.get(url, headers={'User-Agent': ua}, stream=True, timeout=25) as r:
+                # Bağlantı tıkanmasını önlemek için stream ve timeout optimize edildi
+                with session.get(url, headers={'User-Agent': ua}, stream=True, timeout=(10, 30)) as r:
                     r.raise_for_status()
-                    ext = get_extension_from_response(url, r)
-                    path = os.path.join(target_dir, turkish_to_english(name) + ext)
+                    
+                    # Uzantı tespiti
+                    parsed_path = urlparse(url).path
+                    ext = os.path.splitext(parsed_path)[1].lower()
+                    if ext not in ['.mp4', '.mkv', '.avi', '.ts']:
+                        ctype = r.headers.get('Content-Type', '').lower()
+                        ext = '.mp4' if 'mp4' in ctype else '.ts' if 'mp2t' in ctype else '.mkv'
+                    
+                    clean_filename = turkish_to_english(name + ext)
+                    path = os.path.join(target_dir, clean_filename)
                     
                     total = int(r.headers.get('content-length', 0))
-                    # Mevcut dosya kontrolü
                     if os.path.exists(path) and os.path.getsize(path) >= total and total > 0:
-                        print(f"📦 {name} zaten mevcut, geçildi.")
+                        print(f"📦 {clean_filename} zaten var.")
                         success = True; break
 
                     with open(path, 'wb') as f:
-                        with tqdm(total=total, unit='B', unit_scale=True, desc=f"🎬 {name[:20]}", 
-                                  bar_format='{desc}: {percentage:3.0f}% |{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]') as bar:
-                            for chunk in r.iter_content(chunk_size=1024*512):
-                                if chunk: f.write(chunk); bar.update(len(chunk))
+                        with tqdm(total=total, unit='B', unit_scale=True, desc=f"🎬 {clean_filename[:20]}", 
+                                  bar_format='{desc}: {percentage:3.0f}% |{bar}| {n_fmt}/{total_fmt}') as bar:
+                            for chunk in r.iter_content(chunk_size=1024*1024): # 1MB Chunk hızı artırır
+                                if chunk:
+                                    f.write(chunk)
+                                    bar.update(len(chunk))
                     success = True
             except Exception as e:
                 retries += 1
-                print(f"⚠️ Hata: {e}. Retry: {retries}")
-                time.sleep(1)
+                print(f"⚠️ Kesinti: {e}. Yeniden deneniyor ({retries})")
+                time.sleep(2)
 
 def main_menu():
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
         print(f"""
 ==========================================
-    VOD DOWNLOADER PRO DESIGN BY PROTON MEDIA
+    VOD PRO MANAGEMENT SUITE v10
 ==========================================
 1- M3U URL GİR (KATEGORİ SEÇMELİ)
-2- M3U DOSYA SEÇ (MEVCUT DOSYADAN)
+2- M3U DOSYA SEÇ (YEREL)
 3- M3U BİLGİ KONTROL (URL ANALİZ)
 4- USER-AGENT LİSTESİNİ YENİLE
 5- DOSYA İSİMLERİNİ DÜZELT (KLASÖR)
@@ -132,47 +156,50 @@ def main_menu():
         choice = input("Seçiminiz: ")
 
         if choice == '1':
-            url = input("M3U URL: ").strip()
+            url = input("\nM3U URL (Geri için 0): ").strip()
+            if url == '0': continue
             target = input("İndirme Yolu (Enter=Downloads): ") or DOWNLOAD_DIR_DEFAULT
             try:
-                print("📡 Liste çekiliyor...")
-                content = requests.get(url, timeout=30).text
-                categories = parse_m3u_to_categories(content)
-                tasks = select_from_categories(categories)
-                download_engine(tasks, target)
-            except Exception as e: print(f"❌ Hata: {e}")
-            input("\nDevam etmek için Enter...")
+                content = requests.get(url, timeout=20).text
+                cats = parse_m3u_to_categories(content)
+                tasks = select_from_categories(cats)
+                if tasks != "BACK": download_engine(tasks, target)
+            except Exception as e: print(f"❌ Hata: {e}"); time.sleep(2)
 
         elif choice == '2':
-            m3u_files = glob.glob("*.m3u")
-            if not m3u_files:
-                print("❌ Klasörde .m3u dosyası bulunamadı."); time.sleep(2); continue
+            files = glob.glob("*.m3u")
+            if not files: print("❌ M3U bulunamadı."); time.sleep(2); continue
+            print("\n0- GERİ")
+            for i, f in enumerate(files, 1): print(f"{i}- {f}")
+            f_idx = input("\nDosya seçin: ")
+            if f_idx == '0': continue
             
-            print("\nBulunan Dosyalar:")
-            for i, f in enumerate(m3u_files, 1): print(f"{i}- {f}")
-            f_idx = int(input("Dosya No: ")) - 1
-            
-            target = input("İndirme Yolu (Enter=Downloads): ") or DOWNLOAD_DIR_DEFAULT
-            with open(m3u_files[f_idx], 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            
-            categories = parse_m3u_to_categories(content)
-            tasks = select_from_categories(categories)
-            download_engine(tasks, target)
-            input("\nDevam etmek için Enter...")
+            target = input("İndirme Yolu: ") or DOWNLOAD_DIR_DEFAULT
+            with open(files[int(f_idx)-1], 'r', encoding='utf-8', errors='ignore') as f:
+                cats = parse_m3u_to_categories(f.read())
+            tasks = select_from_categories(cats)
+            if tasks != "BACK": download_engine(tasks, target)
+
+        elif choice == '3':
+            url = input("\nAnaliz edilecek URL (Geri için 0): ").strip()
+            if url != '0': check_m3u_info(url)
+            input("Devam etmek için Enter...")
 
         elif choice == '4':
             load_ua_pool(update=True)
-            time.sleep(2)
+            print("✅ Havuz yenilendi."); time.sleep(1)
 
         elif choice == '5':
-            path = input("Düzenlenecek Klasör Yolu: ").strip()
-            if os.path.exists(path):
+            path = input("\nDüzenlenecek Klasör (Geri için 0): ").strip()
+            if path != '0' and os.path.exists(path):
+                print("🛠 İşleniyor...")
                 for f in os.listdir(path):
-                    os.rename(os.path.join(path, f), os.path.join(path, turkish_to_english(f)))
-                print("✅ İsimler temizlendi.")
-            else: print("❌ Yol bulunamadı.")
-            time.sleep(2)
+                    old_path = os.path.join(path, f)
+                    if os.path.isfile(old_path):
+                        new_name = turkish_to_english(f)
+                        os.rename(old_path, os.path.join(path, new_name))
+                print("✅ Tüm dosyalar XTREAM standartlarına göre düzeltildi.")
+            input("Devam etmek için Enter...")
 
         elif choice == '6': break
 
