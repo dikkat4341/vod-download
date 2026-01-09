@@ -7,6 +7,8 @@ import random
 import glob
 import json
 import threading
+import subprocess
+import zipfile
 from tqdm import tqdm
 from urllib.parse import urlparse
 from datetime import datetime
@@ -15,11 +17,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # --- YAPILANDIRMA ---
 ua_file = 'user_agents.txt'
 proxy_cache_file = 'turkey_proxies_cache.json'
-MAX_RETRIES = 30
+MAX_RETRIES = 5  # aria2 kendi retry yapıyor
 DOWNLOAD_DIR_DEFAULT = "Downloads"
-MAX_PROXY_COUNT = 200      # Maksimum 200 adet
-MIN_PROXY_THRESHOLD = 150  # Altına düşerse arka planda yenile
+MAX_PROXY_COUNT = 200
+MIN_PROXY_THRESHOLD = 150
 CACHE_VALID_HOURS = 24
+ARIA2_EXE = "aria2c.exe"  # Windows için
+ARIA2_ZIP = "aria2.zip"
+ARIA2_URL = "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip"
 
 # GLOBAL DEĞİŞKENLER
 PROXY_POOL = []
@@ -27,7 +32,7 @@ PROXY_STATS = {}
 PROXY_AUTO_ENABLED = True
 BACKGROUND_REFRESH_RUNNING = False
 
-# Güncel Türk Proxy Kaynakları (en iyi çalışanlar)
+# Güncel Türk Proxy Kaynakları
 TURKEY_PROXY_SOURCES = [
     'https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=TR',
     'https://www.proxy-list.download/api/v1/get?type=http&country=TR',
@@ -36,8 +41,35 @@ TURKEY_PROXY_SOURCES = [
     'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt',
     'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
     'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
-    'https://www.proxyscan.io/download?type=http',
 ]
+
+# --- ARIA2 OTOMATİK İNDİRME ---
+def setup_aria2():
+    if os.path.exists(ARIA2_EXE):
+        return True
+    print("🌍 aria2 indiriliyor (hızlı indirme için gerekli, 1-2 saniye)...")
+    try:
+        r = requests.get(ARIA2_URL, stream=True, timeout=30)
+        r.raise_for_status()
+        with open(ARIA2_ZIP, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=1024*1024):
+                if chunk:
+                    f.write(chunk)
+        with zipfile.ZipFile(ARIA2_ZIP) as z:
+            for member in z.namelist():
+                if member.endswith('aria2c.exe'):
+                    z.extract(member)
+                    filename = os.path.basename(member)
+                    if filename != ARIA2_EXE:
+                        os.rename(filename, ARIA2_EXE)
+                    break
+        os.remove(ARIA2_ZIP)
+        print("✅ aria2c.exe başarıyla indirildi!")
+        return True
+    except Exception as e:
+        print(f"❌ aria2 indirilemedi: {e}")
+        print("Manuel indirin: https://github.com/aria2/aria2/releases")
+        return False
 
 # --- YARDIMCI FONKSİYONLAR ---
 def generate_random_ua():
@@ -65,7 +97,7 @@ def turkish_to_english_engine(text):
     clean_name = re.sub(r'_+', '_', clean_name).strip('_')
     return clean_name + (ext.lower() if ext else ".mp4")
 
-# --- PROXY YÖNETİMİ (SADECE 200 ÇALIŞAN VE HIZLI) ---
+# --- PROXY YÖNETİMİ ---
 def load_proxy_cache():
     global PROXY_POOL
     if os.path.exists(proxy_cache_file):
@@ -74,7 +106,7 @@ def load_proxy_cache():
                 data = json.load(f)
                 if (time.time() - data.get('timestamp', 0)) / 3600 < CACHE_VALID_HOURS:
                     PROXY_POOL = [{'proxy': p, 'response_time': 0.5} for p in data.get('proxies', [])]
-                    print(f"Önbellekten {len(PROXY_POOL)} proxy yüklendi.")
+                    print(f"📂 Önbellekten {len(PROXY_POOL)} proxy yüklendi.")
                     return True
         except: pass
     return False
@@ -100,14 +132,11 @@ def check_proxy_location(proxy_url, timeout=8):
 
 def collect_turkey_proxies(background=False):
     global PROXY_POOL, BACKGROUND_REFRESH_RUNNING
-    if BACKGROUND_REFRESH_RUNNING:
-        if not background:
-            print("Arka planda zaten proxy toplanıyor...")
-        return
+    if BACKGROUND_REFRESH_RUNNING: return
     BACKGROUND_REFRESH_RUNNING = True
     
     if not background:
-        print("\nMaksimum 200 adet %100 çalışan Türk proxy toplanıyor...")
+        print("\n🇹🇷 200 adet %100 çalışan Türk proxy toplanıyor...")
 
     all_raw = set()
     for source in TURKEY_PROXY_SOURCES:
@@ -118,9 +147,7 @@ def collect_turkey_proxies(background=False):
                 all_raw.update([f'http://{ip}' for ip in found])
         except: pass
 
-    # En fazla 1000 raw proxy al (hızlı olsun)
     unique_raw = list(all_raw)[:1000]
-    
     new_working = []
     with ThreadPoolExecutor(max_workers=40) as executor:
         futures = [executor.submit(check_proxy_location, p) for p in unique_raw]
@@ -128,16 +155,13 @@ def collect_turkey_proxies(background=False):
             res = f.result()
             if res['working']:
                 new_working.append(res)
-                # 200'e ulaştıysak test etmeyi bırak
                 if len(new_working) + len(PROXY_POOL) >= MAX_PROXY_COUNT:
                     break
 
-    # Havuza ekle (çakışma olmadan)
     current = {p['proxy'] for p in PROXY_POOL}
     for p in sorted(new_working, key=lambda x: x['response_time']):
         if p['proxy'] not in current and len(PROXY_POOL) < MAX_PROXY_COUNT:
             PROXY_POOL.append(p)
-            current.add(p['proxy'])
 
     PROXY_POOL.sort(key=lambda x: x['response_time'])
     PROXY_POOL = PROXY_POOL[:MAX_PROXY_COUNT]
@@ -145,7 +169,7 @@ def collect_turkey_proxies(background=False):
     BACKGROUND_REFRESH_RUNNING = False
     
     if not background:
-        print(f"{len(PROXY_POOL)} adet %100 çalışan Türk proxy hazır!")
+        print(f"✅ {len(PROXY_POOL)} adet çalışan Türk proxy hazır!")
 
 def background_proxy_refresher():
     if len(PROXY_POOL) < MIN_PROXY_THRESHOLD and not BACKGROUND_REFRESH_RUNNING:
@@ -181,28 +205,26 @@ def initialize_proxy_pool():
 
 # --- ANA FONKSİYONLAR ---
 def check_m3u_info(url):
-    print("\nXTREAM API Analizi...")
-    if PROXY_AUTO_ENABLED:
-        proxy = get_random_working_proxy()
-        proxies = {'http': proxy['proxy'], 'https': proxy['proxy']} if proxy else None
-    else:
-        proxies = None
+    print("\n🔍 XTREAM API Analizi...")
+    proxy = get_random_working_proxy() if PROXY_AUTO_ENABLED else None
+    proxies = {'http': proxy['proxy'], 'https': proxy['proxy']} if proxy else None
     try:
         parsed = urlparse(url)
         params = dict(re.findall(r'(\w+)=([^&]+)', parsed.query))
         username = params.get('username')
         password = params.get('password')
         if not username or not password:
-            print("Username/password yok!")
+            print("❌ Username/password bulunamadı.")
             return
         api_url = f"{parsed.scheme}://{parsed.netloc}/player_api.php?username={username}&password={password}"
         r = requests.get(api_url, proxies=proxies, timeout=15).json()
         u = r.get('user_info', {})
         exp = datetime.fromtimestamp(int(u.get('exp_date', 0))) if u.get('exp_date') else "Sınırsız"
-        print(f"Durum: {u.get('status')} | Bitiş: {exp}")
-        print(f"Bağlantı: {u.get('active_cons',0)}/{u.get('max_connections',0)}")
-    except:
-        print("API bilgisi alınamadı.")
+        print(f"🚦 Durum: {u.get('status')}")
+        print(f"📅 Bitiş: {exp}")
+        print(f"🔗 Bağlantı: {u.get('active_cons',0)} / {u.get('max_connections',0)}")
+    except Exception as e:
+        print("❌ API hatası.")
 
 def parse_m3u_to_categories(content):
     cats = {}
@@ -212,10 +234,10 @@ def parse_m3u_to_categories(content):
     while i < len(lines):
         line = lines[i].strip()
         if line.startswith('#EXTINF:'):
-            name = re.search(r',(.+)$', line)
-            name = name.group(1).strip() if name else "İsimsiz"
-            group = re.search(r'group-title="([^"]*)"', line)
-            curr = group.group(1) if group else "Belirtilmemiş"
+            name_match = re.search(r',(.+)$', line)
+            name = name_match.group(1).strip() if name_match else "İsimsiz"
+            group_match = re.search(r'group-title="([^"]*)"', line)
+            curr = group_match.group(1) if group_match else "Belirtilmemiş"
             i += 1
             if i < len(lines) and lines[i].strip().startswith('http'):
                 url = lines[i].strip()
@@ -225,10 +247,10 @@ def parse_m3u_to_categories(content):
 
 def select_from_categories(categories):
     if not categories:
-        print("Kategori yok!")
+        print("❌ Kategori bulunamadı.")
         return "BACK"
     names = sorted(categories.keys())
-    print("\n0 - Geri")
+    print("\n0 - GERİ")
     for i, name in enumerate(names, 1):
         print(f"{i} - {name} [{len(categories[name])}]")
     while True:
@@ -239,8 +261,8 @@ def select_from_categories(categories):
             if 0 <= idx < len(names):
                 selected = categories[names[idx]]
                 break
-        except: print("Geçersiz!")
-    print("\n0 - Tümünü İndir")
+        except: print("❌ Geçersiz seçim.")
+    print("\n0 - TÜMÜNÜ İNDİR")
     for i, (_, name) in enumerate(selected, 1):
         print(f"{i} - {name[:70]}")
     choice = input("\nSeçim (0=tümü, virgülle seç): ").strip()
@@ -253,9 +275,9 @@ def select_from_categories(categories):
     return result or "BACK"
 
 def folder_cleaner():
-    path = input("Klasör (boş=Downloads): ").strip() or DOWNLOAD_DIR_DEFAULT
+    path = input("Klasör yolu (boş=Downloads): ").strip() or DOWNLOAD_DIR_DEFAULT
     if not os.path.exists(path):
-        print("Klasör yok!")
+        print("❌ Klasör yok.")
         return
     fixed = 0
     for f in os.listdir(path):
@@ -264,65 +286,89 @@ def folder_cleaner():
             new = turkish_to_english_engine(f)
             if f != new:
                 try:
-                    new_path = os.path.join(path, new)
+                    new_full = os.path.join(path, new)
                     base, ext = os.path.splitext(new)
                     i = 1
-                    while os.path.exists(new_path):
-                        new_path = os.path.join(path, f"{base}_{i}{ext}")
+                    while os.path.exists(new_full):
+                        new_full = os.path.join(path, f"{base}_{i}{ext}")
                         i += 1
-                    os.rename(full, new_path)
-                    print(f"{f} → {os.path.basename(new_path)}")
+                    os.rename(full, new_full)
+                    print(f"🔄 {f} → {os.path.basename(new_full)}")
                     fixed += 1
                 except: pass
-    print(f"{fixed} dosya düzeltildi.")
+    print(f"\n📊 {fixed} dosya düzeltildi.")
 
+# --- YENİ İNDİRME MOTORU (ARIA2 İLE HIZLI) ---
 def download_engine(tasks, target_dir):
     if not tasks or tasks == "BACK": return
+    if not setup_aria2():
+        print("❌ aria2 olmadan indirme yapılamıyor.")
+        input("Devam için Enter...")
+        return
+    
     os.makedirs(target_dir, exist_ok=True)
-    session = requests.Session()
-    ua_pool = load_ua_pool()
     success_count = 0
+    
     for url, name in tasks:
         clean_name = turkish_to_english_engine(name)
-        path = os.path.join(target_dir, clean_name)
+        out_file = clean_name
+        out_path = os.path.join(target_dir, out_file)
+        
         i = 1
         base, ext = os.path.splitext(clean_name)
-        while os.path.exists(path):
-            path = os.path.join(target_dir, f"{base}_{i}{ext}")
+        while os.path.exists(out_path):
+            out_file = f"{base}_{i}{ext}"
+            out_path = os.path.join(target_dir, out_file)
             i += 1
-        success = False
-        for _ in range(MAX_RETRIES):
-            proxy = get_random_working_proxy() if PROXY_AUTO_ENABLED else None
-            proxies = {'http': proxy['proxy'], 'https': proxy['proxy']} if proxy else None
-            try:
-                headers = {'User-Agent': random.choice(ua_pool)}
-                with session.get(url, headers=headers, proxies=proxies, stream=True, timeout=120) as r:
-                    r.raise_for_status()
-                    total = int(r.headers.get('content-length', 0))
-                    with open(path, 'wb') as f, tqdm(total=total, unit='B', unit_scale=True, desc=os.path.basename(path)[:30]) as bar:
-                        for chunk in r.iter_content(1024*1024):
-                            if chunk:
-                                f.write(chunk)
-                                bar.update(len(chunk))
-                success = True
+        
+        proxy = get_random_working_proxy() if PROXY_AUTO_ENABLED else None
+        proxy_str = proxy['proxy'] if proxy else None
+        
+        cmd = [
+            ARIA2_EXE,
+            '--max-connection-per-server=16',
+            '--split=16',
+            '--min-split-size=1M',
+            '--max-tries=10',
+            '--retry-wait=5',
+            '--continue=true',
+            '--summary-interval=5',
+            '--human-readable=true',
+            '--console-log-level=warn',
+            '--dir=' + target_dir,
+            '--out=' + out_file,
+            url
+        ]
+        
+        if proxy_str:
+            cmd.append('--all-proxy=' + proxy_str)
+        
+        print(f"\n🎬 İndiriliyor: {out_file}")
+        try:
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            for line in process.stdout:
+                if any(x in line for x in ['%', 'ETA', 'DL:', 'UP:']):
+                    print(line.strip())
+            process.wait()
+            if process.returncode == 0:
                 success_count += 1
-                mark_proxy_result(proxy['proxy'] if proxy else None, True)
-                print(f"Başarılı: {os.path.basename(path)}")
-                break
-            except Exception as e:
-                mark_proxy_result(proxy['proxy'] if proxy else None, False)
-                print(f"Hata: {str(e)[:60]}")
-                time.sleep(2)
-        if not success:
-            print(f"Başarısız: {name}")
-    print(f"\n{success_count}/{len(tasks)} dosya indirildi.")
+                print(f"✅ TAMAMLANDI: {out_file}")
+                if proxy: mark_proxy_result(proxy['proxy'], True)
+            else:
+                print(f"❌ BAŞARISIZ: {name}")
+                if proxy: mark_proxy_result(proxy['proxy'], False)
+        except Exception as e:
+            print(f"❌ Aria2 hatası: {e}")
+            if proxy: mark_proxy_result(proxy['proxy'], False)
+    
+    print(f"\n🎉 Oturum tamam: {success_count}/{len(tasks)} dosya indirildi (aria2 ile).")
 
 # --- MENÜ ---
 def main_menu():
     initialize_proxy_pool()
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print(f"=== VOD PRO v20 ===\nTürk Proxy: {len(PROXY_POOL)}/200 (Otomatik: {'Açık' if PROXY_AUTO_ENABLED else 'Kapalı'})\n")
+        print(f"=== VOD PRO v21 (aria2 Hızlı İndirme) ===\n🇹🇷 Proxy: {len(PROXY_POOL)}/200 (Otomatik: {'Açık' if PROXY_AUTO_ENABLED else 'Kapalı'})\n")
         print("1 - M3U URL Gir")
         print("2 - M3U Dosya Seç")
         print("3 - API Analiz")
@@ -331,37 +377,45 @@ def main_menu():
         print("6 - Proxy Ayar")
         print("7 - Çıkış")
         choice = input("\nSeçim: ").strip()
+        
         if choice == '1':
             url = input("\nM3U URL: ").strip()
             if url:
                 try:
-                    content = requests.get(url, timeout=20).text
+                    content = requests.get(url, timeout=30).text
                     cats = parse_m3u_to_categories(content)
                     tasks = select_from_categories(cats)
                     download_engine(tasks, DOWNLOAD_DIR_DEFAULT)
-                except: print("URL alınamadı.")
+                except Exception as e:
+                    print(f"❌ URL hatası: {e}")
             input("\nEnter...")
+            
         elif choice == '2':
             file = input("\nM3U dosya adı: ").strip()
             if os.path.exists(file):
                 with open(file, 'r', encoding='utf-8', errors='ignore') as f:
-                    cats = parse_m3u_to_categories(f.read())
+                    content = f.read()
+                cats = parse_m3u_to_categories(content)
                 tasks = select_from_categories(cats)
                 download_engine(tasks, DOWNLOAD_DIR_DEFAULT)
             else:
-                print("Dosya yok!")
+                print("❌ Dosya bulunamadı.")
             input("\nEnter...")
+            
         elif choice == '3':
             url = input("\nXtream URL: ").strip()
             if url: check_m3u_info(url)
             input("\nEnter...")
+            
         elif choice == '4':
             load_ua_pool(True)
-            print("UA havuzu yenilendi.")
+            print("✅ UA havuzu yenilendi.")
             input("\nEnter...")
+            
         elif choice == '5':
             folder_cleaner()
             input("\nEnter...")
+            
         elif choice == '6':
             print(f"\nProxy sayısı: {len(PROXY_POOL)}")
             sub = input("1 - Manuel Yenile\n2 - Otomatik Aç/Kapa\n3 - Geri\nSeçim: ").strip()
@@ -369,10 +423,11 @@ def main_menu():
                 collect_turkey_proxies()
             elif sub == '2':
                 state = toggle_proxy_auto()
-                print(f"Proxy otomatik {'AÇILDI' if state else 'KAPATILDI'}")
+                print(f"✅ Proxy otomatik {'AÇILDI' if state else 'KAPATILDI'}")
             input("\nEnter...")
+            
         elif choice == '7':
-            print("\nGörüşürüz Serdar abi! İyi indirimler 🇹🇷\n")
+            print("\n👋 Görüşürüz Serdar abi! Bol hız, bol indirme! 🇹🇷\n")
             break
 
 if __name__ == "__main__":
