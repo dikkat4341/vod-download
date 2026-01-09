@@ -10,7 +10,7 @@ import threading
 import subprocess
 import zipfile
 from tqdm import tqdm
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -43,33 +43,69 @@ TURKEY_PROXY_SOURCES = [
     'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
 ]
 
-# --- ARIA2 OTOMATİK İNDİRME ---
+# --- ARIA2 OTOMATİK İNDİRME (ALT KLASÖRLERİ DE KONTROL EDİYOR) ---
 def setup_aria2():
     if os.path.exists(ARIA2_EXE):
         return True
-    print("🌍 aria2 indiriliyor (hızlı indirme için gerekli, 1-2 saniye)...")
+    print("🌍 aria2 indiriliyor (hızlı indirme için gerekli)...")
     try:
-        r = requests.get(ARIA2_URL, stream=True, timeout=30)
+        r = requests.get(ARIA2_URL, stream=True, timeout=60)
         r.raise_for_status()
         with open(ARIA2_ZIP, 'wb') as f:
             for chunk in r.iter_content(chunk_size=1024*1024):
                 if chunk:
                     f.write(chunk)
+        
         with zipfile.ZipFile(ARIA2_ZIP) as z:
+            extracted_path = None
             for member in z.namelist():
                 if member.endswith('aria2c.exe'):
                     z.extract(member)
-                    filename = os.path.basename(member)
-                    if filename != ARIA2_EXE:
-                        os.rename(filename, ARIA2_EXE)
+                    extracted_path = member
                     break
+            if not extracted_path:
+                print("❌ aria2c.exe zip içinde bulunamadı!")
+                os.remove(ARIA2_ZIP)
+                return False
+            
+            # Alt klasördeyse ana dizine taşı
+            if '/' in extracted_path or '\\' in extracted_path:
+                os.rename(extracted_path, ARIA2_EXE)
+            else:
+                os.rename(extracted_path, ARIA2_EXE)
+        
         os.remove(ARIA2_ZIP)
-        print("✅ aria2c.exe başarıyla indirildi!")
+        print("✅ aria2c.exe başarıyla indirildi ve hazır!")
         return True
     except Exception as e:
         print(f"❌ aria2 indirilemedi: {e}")
         print("Manuel indirin: https://github.com/aria2/aria2/releases")
         return False
+
+# --- ORİJİNAL DOSYA ADINI ALMA ---
+def get_original_filename(url):
+    try:
+        session = requests.Session()
+        # HEAD isteğiyle header'ları al
+        head = session.head(url, allow_redirects=True, timeout=12)
+        head.raise_for_status()
+        
+        # Content-Disposition'dan dosya adı
+        if 'Content-Disposition' in head.headers:
+            cd = head.headers['Content-Disposition']
+            filename_match = re.findall(r'filename[*]?=["\']?([^";\']+)', cd)
+            if filename_match:
+                return unquote(filename_match[-1].strip())
+        
+        # URL'nin son kısmından
+        parsed = urlparse(url)
+        path = parsed.path
+        filename = os.path.basename(unquote(path))
+        if filename and '.' in filename and len(filename) > 4:
+            return filename
+    except:
+        pass
+    return None
 
 # --- YARDIMCI FONKSİYONLAR ---
 def generate_random_ua():
@@ -137,7 +173,6 @@ def collect_turkey_proxies(background=False):
     
     if not background:
         print("\n🇹🇷 200 adet %100 çalışan Türk proxy toplanıyor...")
-
     all_raw = set()
     for source in TURKEY_PROXY_SOURCES:
         try:
@@ -146,7 +181,6 @@ def collect_turkey_proxies(background=False):
                 found = re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}', r.text)
                 all_raw.update([f'http://{ip}' for ip in found])
         except: pass
-
     unique_raw = list(all_raw)[:1000]
     new_working = []
     with ThreadPoolExecutor(max_workers=40) as executor:
@@ -157,12 +191,10 @@ def collect_turkey_proxies(background=False):
                 new_working.append(res)
                 if len(new_working) + len(PROXY_POOL) >= MAX_PROXY_COUNT:
                     break
-
     current = {p['proxy'] for p in PROXY_POOL}
     for p in sorted(new_working, key=lambda x: x['response_time']):
         if p['proxy'] not in current and len(PROXY_POOL) < MAX_PROXY_COUNT:
             PROXY_POOL.append(p)
-
     PROXY_POOL.sort(key=lambda x: x['response_time'])
     PROXY_POOL = PROXY_POOL[:MAX_PROXY_COUNT]
     save_proxy_cache()
@@ -298,7 +330,7 @@ def folder_cleaner():
                 except: pass
     print(f"\n📊 {fixed} dosya düzeltildi.")
 
-# --- YENİ İNDİRME MOTORU (ARIA2 İLE HIZLI) ---
+# --- İNDİRME MOTORU (ORİJİNAL DOSYA ADI + ARIA2) ---
 def download_engine(tasks, target_dir):
     if not tasks or tasks == "BACK": return
     if not setup_aria2():
@@ -309,13 +341,18 @@ def download_engine(tasks, target_dir):
     os.makedirs(target_dir, exist_ok=True)
     success_count = 0
     
-    for url, name in tasks:
-        clean_name = turkish_to_english_engine(name)
-        out_file = clean_name
+    for url, fallback_name in tasks:
+        # Server'dan orijinal dosya adını al
+        original_name = get_original_filename(url)
+        if not original_name or len(original_name) < 4:
+            original_name = turkish_to_english_engine(fallback_name)  # fallback
+        
+        out_file = original_name
         out_path = os.path.join(target_dir, out_file)
         
+        # Çakışma varsa numara ekle
         i = 1
-        base, ext = os.path.splitext(clean_name)
+        base, ext = os.path.splitext(out_file)
         while os.path.exists(out_path):
             out_file = f"{base}_{i}{ext}"
             out_path = os.path.join(target_dir, out_file)
@@ -332,6 +369,8 @@ def download_engine(tasks, target_dir):
             '--max-tries=10',
             '--retry-wait=5',
             '--continue=true',
+            '--auto-file-renaming=false',
+            '--allow-overwrite=true',
             '--summary-interval=5',
             '--human-readable=true',
             '--console-log-level=warn',
@@ -343,11 +382,11 @@ def download_engine(tasks, target_dir):
         if proxy_str:
             cmd.append('--all-proxy=' + proxy_str)
         
-        print(f"\n🎬 İndiriliyor: {out_file}")
+        print(f"\nİndiriliyor: {out_file} (server orijinal ismi)")
         try:
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             for line in process.stdout:
-                if any(x in line for x in ['%', 'ETA', 'DL:', 'UP:']):
+                if any(keyword in line for keyword in ['%', 'DL:', 'ETA', 'CN:']):
                     print(line.strip())
             process.wait()
             if process.returncode == 0:
@@ -355,20 +394,20 @@ def download_engine(tasks, target_dir):
                 print(f"✅ TAMAMLANDI: {out_file}")
                 if proxy: mark_proxy_result(proxy['proxy'], True)
             else:
-                print(f"❌ BAŞARISIZ: {name}")
+                print(f"❌ BAŞARISIZ: {fallback_name}")
                 if proxy: mark_proxy_result(proxy['proxy'], False)
         except Exception as e:
             print(f"❌ Aria2 hatası: {e}")
             if proxy: mark_proxy_result(proxy['proxy'], False)
     
-    print(f"\n🎉 Oturum tamam: {success_count}/{len(tasks)} dosya indirildi (aria2 ile).")
+    print(f"\nToplam {success_count}/{len(tasks)} dosya indirildi (orijinal isimlerle).")
 
 # --- MENÜ ---
 def main_menu():
     initialize_proxy_pool()
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print(f"=== VOD PRO v21 (aria2 Hızlı İndirme) ===\n🇹🇷 Proxy: {len(PROXY_POOL)}/200 (Otomatik: {'Açık' if PROXY_AUTO_ENABLED else 'Kapalı'})\n")
+        print(f"=== VOD PRO v23 (Orijinal İsim + aria2 Hızlı İndirme) ===\n🇹🇷 Proxy: {len(PROXY_POOL)}/200 (Otomatik: {'Açık' if PROXY_AUTO_ENABLED else 'Kapalı'})\n")
         print("1 - M3U URL Gir")
         print("2 - M3U Dosya Seç")
         print("3 - API Analiz")
@@ -427,7 +466,7 @@ def main_menu():
             input("\nEnter...")
             
         elif choice == '7':
-            print("\n👋 Görüşürüz Serdar abi! Bol hız, bol indirme! 🇹🇷\n")
+            print("\n👋 Görüşürüz Serdar abi! İyi indirimler! 🇹🇷\n")
             break
 
 if __name__ == "__main__":
