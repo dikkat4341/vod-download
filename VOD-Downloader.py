@@ -16,19 +16,19 @@ from datetime import datetime
 ua_file = 'user_agents.txt'
 MAX_RETRIES = 30
 DOWNLOAD_DIR_DEFAULT = "Downloads"
-ARIA2_EXE = "aria2c.exe"  # Bu dosyayı program klasörüne koy!
+ARIA2_EXE = "aria2c.exe"  # aria2c.exe'yi program klasörüne koy!
 
 # --- ARIA2 KONTROL ---
 def check_aria2():
     if not os.path.exists(ARIA2_EXE):
-        print("\n❌ aria2c.exe bulunamadı!")
-        print("Lütfen https://aria2.github.io/ adresinden Windows 64-bit sürümü indirin.")
-        print("aria2c.exe'yi bu programın yanına koyun.")
-        input("Enter tuşuna bas...")
+        print("\naria2c.exe bulunamadi!")
+        print("https://aria2.github.io/ adresinden Windows 64-bit indirin.")
+        print("aria2c.exe'yi bu klasore koyun.")
+        input("Enter tusuna basin...")
         return False
     return True
 
-# --- GÜVENLİ DOSYA ADI TEMİZLEME ---
+# --- GUVENLI DOSYA ADI TEMIZLEME ---
 def clean_name_only(name):
     trans = str.maketrans('ıüğöşçİÜĞÖŞÇ', 'iugoscIUGOSC')
     name = name.translate(trans)
@@ -46,7 +46,7 @@ def get_extension_from_url(url):
         return ext.lower()
     return '.mp4'
 
-# --- FİNAL DOSYA ADI ---
+# --- FINAL DOSYA ADI ---
 def get_final_filename(url, m3u_name):
     try:
         head = requests.head(url, allow_redirects=True, timeout=12)
@@ -64,7 +64,7 @@ def get_final_filename(url, m3u_name):
     ext = get_extension_from_url(url)
     return cleaned + ext
 
-# --- YARDIMCI FONKSİYONLAR ---
+# --- YARDIMCI FONKSIYONLAR ---
 def generate_random_ua():
     chrome_v = f"{random.randint(120, 130)}.0.{random.randint(5000, 7000)}.{random.randint(10, 200)}"
     return f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_v} Safari/537.36"
@@ -82,7 +82,7 @@ def load_ua_pool(update=False):
             f.write('\n'.join(pool))
     return pool
 
-# --- API ANALİZ ---
+# --- API ANALIZ ---
 def check_m3u_info(url):
     print("\nXTREAM API Analizi...")
     try:
@@ -225,9 +225,9 @@ def download_engine(tasks, target_dir):
             process.wait()
             if process.returncode == 0:
                 success_count += 1
-                print(f"✅ TAMAM: {final_name}")
+                print(f"TAMAM: {final_name}")
             else:
-                print(f"❌ BAŞARISIZ: {m3u_name}")
+                print(f"BAŞARISIZ: {m3u_name}")
         except Exception as e:
             print(f"Aria2 hatası: {e}")
     
@@ -238,7 +238,7 @@ def main_menu():
     initialize_proxy_pool()
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print(f"=== VOD PRO v35 (aria2 + Proxy'siz) ===\n")
+        print("=== VOD PRO v35 (aria2 + Proxy'siz) ===\n")
         print("1 - M3U URL Gir")
         print("2 - M3U Dosya Seç")
         print("3 - API Analiz")
