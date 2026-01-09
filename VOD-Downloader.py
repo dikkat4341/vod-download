@@ -17,18 +17,18 @@ ua_file = 'user_agents.txt'
 proxy_cache_file = 'turkey_proxies_cache.json'
 MAX_RETRIES = 30
 DOWNLOAD_DIR_DEFAULT = "Downloads"
-MAX_PROXY_COUNT = 200          # Maksimum proxy sayısı
-MIN_PROXY_THRESHOLD = 150      # Bu sayının altına düşerse otomatik yenileme başlar
-MIN_PROXY_COUNT_INITIAL = 50   # İlk açılışta en az bu kadar proxy topla
-CACHE_VALID_HOURS = 24         # Önbellek ne kadar süre geçerli olsun (saat)
+MAX_PROXY_COUNT = 200
+MIN_PROXY_THRESHOLD = 150
+MIN_PROXY_COUNT_INITIAL = 50
+CACHE_VALID_HOURS = 24
 
-# Proxy yapılandırması
+# GLOBAL DEĞİŞKENLER - EN ÜSTTE TANIMLANIYOR!
 PROXY_POOL = []
 PROXY_STATS = {}
 PROXY_AUTO_ENABLED = True
 BACKGROUND_REFRESH_RUNNING = False
 
-# Güncel ve Çalışan Türk Proxy Kaynakları (2026 itibarıyla aktif olanlar)
+# Güncel Türk Proxy Kaynakları (2026)
 TURKEY_PROXY_SOURCES = [
     'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=TR&ssl=all&anonymity=all',
     'https://www.proxy-list.download/api/v1/get?type=http&country=TR',
@@ -82,19 +82,22 @@ def load_proxy_cache():
                 age_hours = (time.time() - data.get('timestamp', 0)) / 3600
                 if age_hours < CACHE_VALID_HOURS:
                     proxies = data.get('proxies', [])
-                    PROXY_POOL = [{'proxy': p, 'response_time': 0.5} for p in proxies]  # varsayılan rt
-                    print(f"📂 Önbellekten {len(PROXY_POOL)} proxy yüklendi ({age_hours:.1f} saat önce)")
+                    PROXY_POOL = [{'proxy': p, 'response_time': 0.5} for p in proxies]
+                    print(f"📂 Önbellekten {len(PROXY_POOL)} proxy yüklendi ({age_hours:.1f} saat eski)")
                     return True
         except Exception as e:
-            print(f"Önbellek okuma hatası: {e}")
+            print(f"Önbellek hatası: {e}")
     return False
 
 def save_proxy_cache():
-    with open(proxy_cache_file, 'w') as f:
-        json.dump({
-            'timestamp': time.time(),
-            'proxies': [p['proxy'] for p in PROXY_POOL]
-        }, f)
+    global PROXY_POOL
+    try:
+        with open(proxy_cache_file, 'w') as f:
+            json.dump({
+                'timestamp': time.time(),
+                'proxies': [p['proxy'] for p in PROXY_POOL]
+            }, f)
+    except: pass
 
 def check_proxy_location(proxy_url, timeout=8):
     proxies = {'http': proxy_url, 'https': proxy_url}
@@ -104,7 +107,7 @@ def check_proxy_location(proxy_url, timeout=8):
         rt = time.time() - start
         if response.status_code == 200:
             data = response.json()
-            if data.get('countryCode') == 'TR':
+            if data.get('countryCode') == 'TR' and data.get('status') == 'success':
                 return {
                     'working': True,
                     'proxy': proxy_url,
@@ -117,10 +120,16 @@ def check_proxy_location(proxy_url, timeout=8):
 
 def collect_turkey_proxies(background=False):
     global PROXY_POOL, BACKGROUND_REFRESH_RUNNING
+    if BACKGROUND_REFRESH_RUNNING and not background:
+        print("⏳ Arka planda zaten proxy toplanıyor...")
+        return
+    
     if not background:
-        print("\n🌍 Türk proxy'ler toplanıyor... (Bu biraz sürebilir)")
-
+        print("\n🌍 Türk proxy havuzu güncelleniyor... (maks 200 adet %100 çalışan)")
+    
+    BACKGROUND_REFRESH_RUNNING = True
     all_raw = set()
+    
     for source in TURKEY_PROXY_SOURCES:
         try:
             r = requests.get(source, timeout=12)
@@ -131,91 +140,90 @@ def collect_turkey_proxies(background=False):
         except:
             continue
 
-    unique_raw = list(all_raw)
+    unique_raw = list(all_raw)[:1000]  # Max 1000 test et
     new_working = []
     
     with ThreadPoolExecutor(max_workers=30) as executor:
         futures = {executor.submit(check_proxy_location, p): p for p in unique_raw}
-        for future in tqdm(as_completed(futures), total=len(unique_raw), desc="TR Proxy Test", disable=background):
+        for future in tqdm(as_completed(futures), total=min(500, len(unique_raw)), 
+                          desc="🇹🇷 Proxy Test", disable=background or len(unique_raw)<50):
             res = future.result()
-            if res['working']:
+            if res['working'] and len(new_working) < MAX_PROXY_COUNT:
                 new_working.append(res)
-                if len(new_working) + len(PROXY_POOL) >= MAX_PROXY_COUNT:
-                    break
 
-    new_working.sort(key=lambda x: x['response_time'])
-    
-    # Mevcut havuzu güncelle (en hızlıları önde)
+    # Mevcut havuza ekle (çakışma kontrolü ile)
+    new_proxies = []
     current_proxies = {p['proxy'] for p in PROXY_POOL}
     for p in new_working:
-        if p['proxy'] not in current_proxies and len(PROXY_POOL) < MAX_PROXY_COUNT:
-            PROXY_POOL.append(p)
-            current_proxies.add(p['proxy'])
-
+        if p['proxy'] not in current_proxies and len(PROXY_POOL) + len(new_proxies) < MAX_PROXY_COUNT:
+            new_proxies.append(p)
+    
+    PROXY_POOL.extend(new_proxies)
     PROXY_POOL.sort(key=lambda x: x['response_time'])
-    PROXY_POOL = PROXY_POOL[:MAX_PROXY_COUNT]  # Max 200
-
+    PROXY_POOL = PROXY_POOL[:MAX_PROXY_COUNT]
+    
     save_proxy_cache()
+    BACKGROUND_REFRESH_RUNNING = False
     
     if not background:
-        print(f"✅ {len(new_working)} yeni çalışan Türk proxy eklendi. Toplam: {len(PROXY_POOL)}")
-    
-    BACKGROUND_REFRESH_RUNNING = False
+        print(f"✅ {len(new_working)} yeni proxy eklendi. Toplam: {len(PROXY_POOL)}/{MAX_PROXY_COUNT}")
+    else:
+        print(f"🔄 Arka plan proxy yenileme: {len(PROXY_POOL)} adet hazır")
 
 def background_proxy_refresher():
     global BACKGROUND_REFRESH_RUNNING
-    if BACKGROUND_REFRESH_RUNNING:
+    if BACKGROUND_REFRESH_RUNNING or len(PROXY_POOL) >= MIN_PROXY_THRESHOLD:
         return
-    BACKGROUND_REFRESH_RUNNING = True
     threading.Thread(target=collect_turkey_proxies, kwargs={'background': True}, daemon=True).start()
 
 def get_random_working_proxy():
     global PROXY_POOL
     if not PROXY_POOL:
         return None
-    # Başarısızları az olanları önceliklendir
-    candidates = [p for p in PROXY_POOL if PROXY_STATS.get(p['proxy'], {}).get('f', 0) < 5]
-    if not candidates:
-        return None
-    return random.choice(candidates[:20])  # En hızlı 20'den seç
+    # Sadece çalışan proxy'leri seç (5+ başarısızlık yok)
+    candidates = [p for p in PROXY_POOL[:30] if PROXY_STATS.get(p['proxy'], {}).get('f', 0) < 5]
+    return random.choice(candidates) if candidates else None
 
 def mark_proxy_result(proxy_url, success=True):
-    if not proxy_url:
+    global PROXY_POOL, PROXY_AUTO_ENABLED
+    if not proxy_url or not PROXY_AUTO_ENABLED:
         return
+    
     if proxy_url not in PROXY_STATS:
         PROXY_STATS[proxy_url] = {'s': 0, 'f': 0}
+    
     if success:
         PROXY_STATS[proxy_url]['s'] += 1
     else:
         PROXY_STATS[proxy_url]['f'] += 1
-        if PROXY_STATS[proxy_url]['f'] > 5:
-            global PROXY_POOL
-            PROXY_POOL = [p for p in PROXY_POOL if p['proxy'] != proxy_url]
-            # Havuz azaldıysa arka planda yenile
-            if len(PROXY_POOL) < MIN_PROXY_THRESHOLD:
-                background_proxy_refresher()
+        
+        # 5+ başarısızlık = proxy listeden çıkar
+        if PROXY_STATS[proxy_url]['f'] >= 5:
+            PROXY_POOL[:] = [p for p in PROXY_POOL if p['proxy'] != proxy_url]
+            print(f"🗑️ Ölü proxy kaldırıldı: {proxy_url}")
+        
+        # Havuz azaldıysa arka planda yenile
+        if len(PROXY_POOL) < MIN_PROXY_THRESHOLD:
+            background_proxy_refresher()
 
-# İlk yükleme ve kontrol
 def initialize_proxy_pool():
-    if not load_proxy_cache():
-        print("Önbellek yok veya eski → Yeni proxy toplanıyor...")
-        collect_turkey_proxies()
-    else:
-        if len(PROXY_POOL) < MIN_PROXY_COUNT_INITIAL:
-            print("Yeterli proxy yok → Ek proxy toplanıyor...")
-            collect_turkey_proxies()
+    global PROXY_AUTO_ENABLED
+    print("🚀 Proxy sistemi başlatılıyor...")
+    load_ua_pool()
     
-    # Her durumda azalmayı izle
-    if len(PROXY_POOL) < MIN_PROXY_THRESHOLD:
-        print("Proxy sayısı düşük → Arka planda yenileme başlatılıyor...")
-        background_proxy_refresher()
+    if load_proxy_cache():
+        working_count = len([p for p in PROXY_POOL if PROXY_STATS.get(p['proxy'], {}).get('f', 0) < 5])
+        print(f"📂 {len(PROXY_POOL)} proxy önbellekten yüklendi ({working_count} çalışan)")
+        
+        if working_count < MIN_PROXY_COUNT_INITIAL:
+            print("⚠️  Yeterli çalışan proxy yok → Yeni toplama başlıyor...")
+            collect_turkey_proxies()
+    else:
+        collect_turkey_proxies()
 
-# --- DİĞER FONKSİYONLAR (önceki kodundan aynı, kısaltarak ekliyorum) ---
-# check_m3u_info, folder_cleaner, download_engine, parse_m3u_to_categories, select_from_categories aynı kalıyor
-# (Yer tasarrufu için aynı bırakıyorum, önceki mesajımdan kopyala)
-
+# --- ANA FONKSİYONLAR ---
 def check_m3u_info(url):
-    print("\n🔍 XTREAM API Sorgulanıyor...")
+    print("\n🔍 XTREAM API Analizi...")
     p_info = get_random_working_proxy() if PROXY_AUTO_ENABLED else None
     proxies = {'http': p_info['proxy'], 'https': p_info['proxy']} if p_info else None
     try:
@@ -224,100 +232,23 @@ def check_m3u_info(url):
         username = params.get('username')
         password = params.get('password')
         if not username or not password:
-            print("❌ URL'de username/password bulunamadı.")
+            print("❌ URL'de username/password yok!")
             return
         api_url = f"{parsed.scheme}://{parsed.netloc}/player_api.php?username={username}&password={password}"
-        r = requests.get(api_url, proxies=proxies, timeout=15).json()
+        r = requests.get(api_url, proxies=proxies, timeout=15, headers={'User-Agent': generate_random_ua()}).json()
         u = r.get('user_info', {})
         status = u.get('status', 'Bilinmiyor')
-        exp = u.get('exp_date')
-        exp_date = datetime.fromtimestamp(int(exp)).strftime('%d.%m.%Y %H:%M') if exp and int(exp) > 0 else "Sınırsız"
-        active = u.get('active_cons', 0)
-        max_cons = u.get('max_connections', 0)
-        print(f"🚦 Durum: {status}")
-        print(f"📅 Bitiş: {exp_date}")
-        print(f"🔗 Bağlantı: {active} / {max_cons}")
+        exp = u.get('exp_date', 0)
+        exp_date = datetime.fromtimestamp(int(exp)).strftime('%d.%m.%Y %H:%M') if exp else "Sınırsız"
+        print(f"🚦 Durum: {status} | 📅 Bitiş: {exp_date}")
+        print(f"👥 Aktif: {u.get('active_cons',0)}/{u.get('max_connections',0)}")
+        print(f"📦 Live: {u.get('live',0)} | VOD: {u.get('vod',0)} | Movie: {u.get('movie',0)}")
     except Exception as e:
-        print("❌ API bilgisi alınamadı:", str(e))
-
-def folder_cleaner(path=None):
-    if not path:
-        path = input("Klasör yolu (boşsa Downloads): ").strip() or DOWNLOAD_DIR_DEFAULT
-    if not os.path.exists(path):
-        print("❌ Klasör bulunamadı.")
-        return
-    files = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
-    fixed, clean, error = 0, 0, 0
-    print(f"\n🛠 {len(files)} dosya denetleniyor...\n")
-    for f in files:
-        old_path = os.path.join(path, f)
-        new_name = turkish_to_english_engine(f)
-        new_path = os.path.join(path, new_name)
-        if f == new_name:
-            print(f"✅ [DÜZGÜN]: {f}"); clean += 1
-        else:
-            try:
-                if os.path.exists(new_path):
-                    base, ext = os.path.splitext(new_name)
-                    i = 1
-                    while os.path.exists(new_path):
-                        new_path = os.path.join(path, f"{base}_{i}{ext}"); i += 1
-                os.rename(old_path, new_path)
-                print(f"🔄 [DÜZELTİLDİ]: {f} → {os.path.basename(new_path)}"); fixed += 1
-            except Exception as e:
-                print(f"❌ [HATA]: {f}"); error += 1
-    print(f"\n📊 RAPOR: {clean} Düzgün, {fixed} Düzeltildi, {error} Hata.")
-
-def download_engine(tasks, target_dir):
-    if not tasks or tasks == "BACK":
-        return
-    os.makedirs(target_dir, exist_ok=True)
-    session = requests.Session()
-    ua_pool = load_ua_pool()
-
-    for url, name in tasks:
-        success, retries = False, 0
-        clean_name = turkish_to_english_engine(name)
-        f_path = os.path.join(target_dir, clean_name)
-        if os.path.exists(f_path):
-            base, ext = os.path.splitext(clean_name)
-            i = 1
-            while os.path.exists(f_path):
-                f_path = os.path.join(target_dir, f"{base}_{i}{ext}"); i += 1
-
-        while retries < MAX_RETRIES and not success:
-            p_info = get_random_working_proxy() if PROXY_AUTO_ENABLED else None
-            proxy_url = p_info['proxy'] if p_info else None
-            proxies = {'http': proxy_url, 'https': proxy_url} if proxy_url else None
-
-            try:
-                headers = {'User-Agent': random.choice(ua_pool)}
-                with session.get(url, headers=headers, proxies=proxies, stream=True, timeout=(10, 90)) as r:
-                    r.raise_for_status()
-                    total = int(r.headers.get('content-length', 0))
-                    with open(f_path, 'wb') as f:
-                        with tqdm(total=total, unit='B', unit_scale=True, desc=f"🎬 {os.path.basename(f_path)[:30]}",
-                                  bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]') as bar:
-                            for chunk in r.iter_content(chunk_size=1024*1024):
-                                if chunk:
-                                    f.write(chunk)
-                                    bar.update(len(chunk))
-                    success = True
-                    mark_proxy_result(proxy_url, True)
-                    print(f"✅ Başarılı: {os.path.basename(f_path)}")
-            except Exception as e:
-                retries += 1
-                mark_proxy_result(proxy_url, False)
-                print(f"⚠️ Hata ({retries}/{MAX_RETRIES}): {str(e)[:60]}")
-                time.sleep(random.uniform(1, 4))
-        if not success:
-            print(f"❌ Başarısız: {os.path.basename(f_path)}")
-
-# parse_m3u_to_categories ve select_from_categories (önceki mesajımdan aynı)
+        print(f"❌ API hatası: {str(e)[:100]}")
 
 def parse_m3u_to_categories(content):
     cats = {}
-    curr = "Diğer"
+    curr_cat = "Diğer"
     lines = content.splitlines()
     i = 0
     while i < len(lines):
@@ -325,118 +256,247 @@ def parse_m3u_to_categories(content):
         if line.startswith('#EXTINF:'):
             name_match = re.search(r',(.+)$', line)
             name = name_match.group(1).strip() if name_match else f"İsimsiz_{i}"
-            group_match = re.search(r'group-title="([^"]+)"', line)
-            curr = group_match.group(1) if group_match else "Belirtilmemiş"
+            group_match = re.search(r'group-title="([^"]*)"', line)
+            curr_cat = group_match.group(1) if group_match else "Belirtilmemiş"
             i += 1
-            if i < len(lines) and lines[i].strip().startswith('http'):
+            if i < len(lines):
                 url = lines[i].strip()
-                if curr not in cats: cats[curr] = []
-                cats[curr].append((url, name))
+                if url.startswith('http'):
+                    if curr_cat not in cats: cats[curr_cat] = []
+                    cats[curr_cat].append((url, name))
         i += 1
     return cats
 
 def select_from_categories(categories):
     if not categories:
-        print("❌ Kategori bulunamadı.")
+        print("❌ Hiç kategori bulunamadı!")
         return "BACK"
-    names = sorted(categories.keys())
-    print("\n0- GERİ DÖN")
-    for i, n in enumerate(names, 1):
-        print(f"{i}- {n} [{len(categories[n])} içerik]")
+    
+    names = sorted(cats := {k: len(v) for k, v in categories.items()}.keys())
+    print("\n📂 Kategoriler:")
+    print("0- GERİ")
+    for i, cat in enumerate(names, 1):
+        print(f"{i:2}- {cat:<25} [{categories[cat]:>3}]")
+    
     while True:
-        idx = input("\nKategori seçin: ").strip()
-        if idx == '0': return "BACK"
-        if idx.isdigit() and 1 <= int(idx) <= len(names):
-            selected_cat = categories[names[int(idx)-1]]
-            break
-        print("❌ Geçersiz seçim.")
-    print("\n0- TÜMÜNÜ İNDİR")
+        try:
+            choice = input("\nKategori: ").strip()
+            if choice == '0': return "BACK"
+            idx = int(choice) - 1
+            if 0 <= idx < len(names):
+                selected_cat = categories[names[idx]]
+                break
+            print("❌ Geçersiz!")
+        except: print("❌ Sayı gir!")
+    
+    # İçerik seçimi
+    print(f"\n🎬 {names[idx]} ({len(selected_cat)} içerik):")
+    print("0- TÜMÜNÜ İNDİR")
     for i, (_, name) in enumerate(selected_cat, 1):
-        print(f"{i}- {name[:70]}")
-    choice = input("\nSeçiminiz (0 = tümü, virgülle birden fazla, boş = geri): ").strip()
-    if not choice: return "BACK"
-    if choice == '0': return selected_cat
+        print(f"{i:2}- {name[:60]}")
+    
+    choice = input("\nSeçim (virgülle, 0=tümü, boş=geri): ").strip()
+    if not choice or choice == '0': return selected_cat
+    
     selected = []
-    for num in choice.replace(' ', '').split(','):
-        if num.isdigit():
-            idx = int(num) - 1
+    for num in choice.split(','):
+        try:
+            idx = int(num.strip()) - 1
             if 0 <= idx < len(selected_cat):
                 selected.append(selected_cat[idx])
+        except: pass
     return selected if selected else "BACK"
 
-# --- MENÜ ---
-def main_menu():
-    load_ua_pool()
-    initialize_proxy_pool()
+def folder_cleaner(path=None):
+    path = path or input("Klasör (boş=Downloads): ").strip() or DOWNLOAD_DIR_DEFAULT
+    if not os.path.exists(path):
+        print("❌ Klasör yok!")
+        return
+    files = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
+    fixed, clean, error = 0, 0, 0
+    print(f"\n🛠️ {len(files)} dosya kontrol ediliyor...")
+    for f in files:
+        old = os.path.join(path, f)
+        new_name = turkish_to_english_engine(f)
+        new_path = os.path.join(path, new_name)
+        if f == new_name:
+            print(f"✅ {f}")
+            clean += 1
+            continue
+        try:
+            # Çakışma kontrolü
+            base, ext = os.path.splitext(new_name)
+            counter = 1
+            while os.path.exists(new_path):
+                new_path = os.path.join(path, f"{base}_{counter}{ext}")
+                counter += 1
+            os.rename(old, new_path)
+            print(f"🔧 {f} → {os.path.basename(new_path)}")
+            fixed += 1
+        except Exception as e:
+            print(f"❌ {f}: {e}")
+            error += 1
+    print(f"\n📊 {clean} OK, {fixed} düzeltildi, {error} hata")
 
+def download_engine(tasks, target_dir):
+    global PROXY_AUTO_ENABLED
+    if not tasks or tasks == "BACK": return
+    
+    os.makedirs(target_dir, exist_ok=True)
+    session = requests.Session()
+    ua_pool = load_ua_pool()
+    success_count = 0
+    
+    for url, name in tasks:
+        clean_name = turkish_to_english_engine(name)
+        f_path = os.path.join(target_dir, clean_name)
+        
+        # Dosya çakışması kontrolü
+        base, ext = os.path.splitext(clean_name)
+        counter = 1
+        while os.path.exists(f_path):
+            f_path = os.path.join(target_dir, f"{base}_{counter}{ext}")
+            counter += 1
+        
+        file_success = False
+        for attempt in range(MAX_RETRIES):
+            p_info = get_random_working_proxy() if PROXY_AUTO_ENABLED else None
+            proxy_url = p_info['proxy'] if p_info else None
+            proxies = {'http': proxy_url, 'https': proxy_url} if proxy_url else None
+            
+            try:
+                headers = {'User-Agent': random.choice(ua_pool)}
+                with session.get(url, headers=headers, proxies=proxies, 
+                               stream=True, timeout=(15, 120)) as r:
+                    r.raise_for_status()
+                    total_size = int(r.headers.get('content-length', 0))
+                    
+                    with open(f_path, 'wb') as f, tqdm(
+                        total=total_size, unit='B', unit_scale=True, 
+                        desc=f"📹 {os.path.basename(f_path):<40}",
+                        bar_format='{desc}{percentage:3.0f}%|{bar}|{n_fmt}/{total_fmt} {rate_fmt}{postfix}'
+                    ) as pbar:
+                        for chunk in r.iter_content(chunk_size=2*1024*1024):
+                            if chunk:
+                                f.write(chunk)
+                                pbar.update(len(chunk))
+                
+                file_success = True
+                success_count += 1
+                mark_proxy_result(proxy_url, True)
+                print(f"✅ TAMAMLANDI: {os.path.basename(f_path)}")
+                break
+                
+            except Exception as e:
+                mark_proxy_result(proxy_url, False)
+                print(f"⚠️  Deneme {attempt+1}/{MAX_RETRIES}: {str(e)[:80]}")
+                time.sleep(random.uniform(2, 5))
+        
+        if not file_success:
+            print(f"❌ BAŞARISIZ: {name}")
+    
+    print(f"\n🎉 Oturum tamamlandı: {success_count}/{len(tasks)} başarılı")
+
+# --- ANA MENÜ ---
+def main_menu():
+    global PROXY_AUTO_ENABLED
+    
+    # CRITICAL: Global değişkenler düzgün initialize ediliyor
+    initialize_proxy_pool()
+    
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        status = "Açık" if PROXY_AUTO_ENABLED else "Kapalı"
-        print(f"=== VOD PRO v14 ===\n🇹🇷 Türk Proxy: {len(PROXY_POOL)} / {MAX_PROXY_COUNT} (Otomatik: {status})\n")
-        print("1- URL GİR (M3U)")
-        print("2- DOSYA SEÇ (M3U)")
-        print("3- API ANALİZ")
-        print("4- UA YENİLE")
-        print("5- İSİM DÜZELT")
-        print("6- PROXY AYAR")
-        print("7- ÇIKIŞ")
+        working_proxies = len([p for p in PROXY_POOL if PROXY_STATS.get(p['proxy'], {}).get('f', 0) < 5])
+        status = "🟢" if PROXY_AUTO_ENABLED else "🔴"
+        print(f"""
+╔══════════════════════════════════════╗
+║     🇹🇷 VOD PRO v15 - TURK PROXY     ║
+║  Proxy: {len(PROXY_POOL)}/{MAX_PROXY_COUNT} ({working_proxies} çalışan) {status} ║
+╚══════════════════════════════════════╝
+        """)
+        print("1️⃣  M3U URL Gir")
+        print("2️⃣  M3U Dosya Seç") 
+        print("3️⃣  API Analiz")
+        print("4️⃣  UA Yenile")
+        print("5️⃣  İsim Düzelt")
+        print("6️⃣  Proxy Ayar")
+        print("0️⃣  ÇIKIŞ")
         
-        c = input("\nSeçim: ").strip()
+        c = input("\n👉 Seçim: ").strip()
         
         if c == '1':
-            url = input("\nM3U URL: ").strip()
-            if url:
+            url = input("\n🌐 M3U URL: ").strip()
+            if url and url != '0':
                 try:
-                    res = requests.get(url, timeout=15).text
+                    print("📥 M3U okunuyor...")
+                    res = requests.get(url, timeout=20).text
                     cats = parse_m3u_to_categories(res)
                     tasks = select_from_categories(cats)
                     download_engine(tasks, DOWNLOAD_DIR_DEFAULT)
                 except Exception as e:
                     print(f"❌ Hata: {e}")
-                input("\nEnter...")
-                
+            input("\n⏸️  Enter...")
+            
         elif c == '2':
-            files = glob.glob("*.m3u") + glob.glob("*.m3u8")
-            if files:
-                print("Bulunanlar:", ', '.join([os.path.basename(f) for f in files]))
-            file = input("\nDosya adı: ").strip()
+            m3u_files = glob.glob("*.m3u*")
+            if m3u_files:
+                print("📁 Bulunan M3U:", ', '.join([os.path.basename(f) for f in m3u_files[:10]]))
+            file = input("📄 Dosya adı: ").strip()
             if os.path.exists(file):
                 with open(file, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
                 cats = parse_m3u_to_categories(content)
                 tasks = select_from_categories(cats)
                 download_engine(tasks, DOWNLOAD_DIR_DEFAULT)
-            input("\nEnter...")
+            else:
+                print("❌ Dosya yok!")
+            input("\n⏸️  Enter...")
             
         elif c == '3':
-            url = input("\nXtream URL: ").strip()
-            if url: check_m3u_info(url)
-            input("\nEnter...")
+            url = input("\n🔗 Xtream URL: ").strip()
+            check_m3u_info(url)
+            input("\n⏸️  Enter...")
             
         elif c == '4':
-            load_ua_pool(update=True)
-            print("✅ UA yenilendi.")
-            input("Enter...")
+            load_ua_pool(True)
+            print("✅ UA havuzu yenilendi!")
+            input("⏸️  Enter...")
             
         elif c == '5':
             folder_cleaner()
-            input("\nEnter...")
+            input("⏸️  Enter...")
             
         elif c == '6':
-            print(f"\nProxy: {len(PROXY_POOL)} adet")
-            print(f"Otomatik: {'Açık' if PROXY_AUTO_ENABLED else 'Kapalı'}")
-            ch = input("\n1- Manuel Yenile\n2- Otomatik Aç/Kapa\n3- Geri\nSeçim: ")
+            print(f"\n📊 PROXY İSTATİSTİK")
+            print(f"  • Toplam: {len(PROXY_POOL)}")
+            print(f"  • Çalışan: {working_proxies}")
+            print(f"  • Otomatik: {'AÇIK' if PROXY_AUTO_ENABLED else 'KAPALI'}")
+            print("\n1- Manuel Yenile (200 proxy)")
+            print("2- Otomatik Aç/Kapat")
+            print("3- Önbelleği Sil")
+            ch = input("👉: ").strip()
+            
             if ch == '1':
                 collect_turkey_proxies()
             elif ch == '2':
-                global PROXY_AUTO_ENABLED
                 PROXY_AUTO_ENABLED = not PROXY_AUTO_ENABLED
-                print(f"Otomatik {'açıldı' if PROXY_AUTO_ENABLED else 'kapatıldı'}.")
-            input("Enter...")
+                print(f"✅ Otomatik proxy {'AÇILDI' if PROXY_AUTO_ENABLED else 'KAPATILDI'}")
+            elif ch == '3':
+                if os.path.exists(proxy_cache_file):
+                    os.remove(proxy_cache_file)
+                    PROXY_POOL.clear()
+                    print("🗑️  Önbellek silindi!")
+                    initialize_proxy_pool()
+            input("⏸️  Enter...")
             
-        elif c == '7':
-            print("👋 Çıkış...")
+        elif c == '0':
+            print("👋 Görüşürüz!")
             break
 
 if __name__ == "__main__":
-    main_menu()
+    try:
+        main_menu()
+    except KeyboardInterrupt:
+        print("\n\n⏹️  Program kullanıcı tarafından durduruldu.")
+    except Exception as e:
+        print(f"\n💥 Kritik hata: {e}")
