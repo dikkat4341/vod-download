@@ -22,7 +22,7 @@ ARIA2_EXE = "aria2c.exe"  # Bu dosyayı program klasörüne koy!
 def check_aria2():
     if not os.path.exists(ARIA2_EXE):
         print("\n❌ aria2c.exe bulunamadı!")
-        print("Lütfen şu adresten indir: https://aria2.github.io/")
+        print("Lütfen https://aria2.github.io/ adresinden Windows 64-bit sürümü indirin.")
         print("aria2c.exe'yi bu programın yanına koyun.")
         input("Enter tuşuna bas...")
         return False
